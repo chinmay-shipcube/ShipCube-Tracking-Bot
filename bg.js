@@ -1021,7 +1021,17 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     case "log": log(msg.m, msg.c); reply({ ok: true }); return;
     case "whoami": return go(() => ({ tabId, worker: (S.workers && S.workers[tabId]) || null }));
     case "startRun": return go(() => startRun(msg, sender));
-    case "stopRun": return go(() => { stopRun(msg.why); return { ok: true }; });
+    case "stopRun": return go(async () => {   // ■ Stop: the run ends AND every tab the bot opened is closed (⏸ Pause keeps them open)
+      const was = S.running;
+      stopRun(msg.why);
+      if (was || Object.keys(S.workers || {}).length) {
+        await closeStrays(S.winId);
+        const n = Object.keys(S.workers || {}).length;
+        await closeWorkers();
+        if (n) log(`Closed the bot's ${n} tracking tab${n > 1 ? "s" : ""}.`);
+      }
+      return { ok: true };
+    });
     case "resetRun": return go(() => { if (!S.running) { const keep = { req: S.req }; S = Object.assign(fresh(), keep); save(true); } return { ok: true }; });
     case "resume": return go(() => {
       if (S.running && S.paused) { S.resumedAt = Date.now(); if (S.pausedBy === "user") log("▶ Resumed."); S.paused = false; S.pausedBy = ""; save(true); kickAll(); }
