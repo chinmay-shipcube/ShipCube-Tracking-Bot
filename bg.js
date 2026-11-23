@@ -336,11 +336,61 @@ async function dbFlush() {
 }
 
 // ---------------- the queue ----------------
+// ---------------- two PCs (or a person) on the same Blank / Not found rows ----------------
+// Before a batch goes out, the next rows are read from the sheet again (up to 300 at a time). A row that is no
+// longer blank / "Not found" - another PC or a person already filled it - is dropped, so when two PCs meet in the
+// middle they skip what the other did and finish. Needs the sheet script v15 ("rows").
+function stillWanted(st) {
+  st = String(st || "").trim();
+  if (S.onlyKind === "blank") return !st;
+  if (S.onlyKind === "nf") return /^not found$/i.test(st);
+  if (S.onlyKind === "bnf") return !st || /^not found$/i.test(st);
+  return true;
+}
+let prechecking = false;
+async function precheck(site) {
+  if (!S.onlyKind || S.noRowsAction || prechecking) return;
+  const q = site === "usps" ? S.uq : S.queue, pos = site === "usps" ? S.upos : S.pos, now = Date.now(), FRESH = 90000;
+  let need = false, seen = 0;
+  for (let i = pos; i < q.length && seen < 100; i++) { if (q[i].done) continue; seen++; if (!q[i].chk || now - q[i].chk > FRESH) { need = true; break; } }
+  if (!need) return;
+  const pick = []; let lo = Infinity, hi = -Infinity;
+  for (let i = pos; i < q.length && pick.length < 300; i++) {
+    const x = q[i];
+    if (x.done || (x.chk && now - x.chk <= FRESH)) continue;
+    const a = Math.min(lo, x.row), b = Math.max(hi, x.row);
+    if (pick.length && b - a > 6000) break;          // keep one sheet read small
+    lo = a; hi = b; pick.push(x);
+  }
+  if (!pick.length) return;
+  prechecking = true;
+  let r;
+  try { r = await sheetCall("rows", { rows: pick.map((x) => x.row) }); } catch { r = null; } finally { prechecking = false; }
+  if (!r || !r.ok || !Array.isArray(r.rows)) {
+    if (r && /unknown action/i.test(r.error || "")) { S.noRowsAction = 1; log("Tip: update the sheet script to v15 - then two PCs on the same Blank / Not found rows skip what the other one already did.", "warn"); }
+    return;
+  }
+  const by = {}; r.rows.forEach((y) => { by[y.row] = y; });
+  let gone = 0, from = Infinity, to = -Infinity;
+  pick.forEach((x) => {
+    x.chk = now;
+    const y = by[x.row];
+    if (!y) return;
+    if ((y.tn && y.tn.toUpperCase() !== String(x.tn).toUpperCase()) || !stillWanted(y.status)) { x.done = 1; gone++; from = Math.min(from, x.row); to = Math.max(to, x.row); }
+  });
+  if (gone) {
+    S.total = Math.max(0, (S.total || 0) - gone); S.othersDid = (S.othersDid || 0) + gone;
+    log(`${gone} row${gone > 1 ? "s" : ""} between ${from} and ${to} ${gone > 1 ? "were" : "was"} already filled in the sheet (another PC or a person) - skipped${S.othersDid > gone ? ` (${S.othersDid} so far)` : ""}.`);
+    save();
+  }
+}
+
 function nextBatch(site, max) {
   if (site === "usps") {
     const items = [], seen = new Set(), cap = Math.max(1, Math.min(USPS_BATCH, max || USPS_BATCH));
     while (S.upos < S.uq.length) {
       const it = S.uq[S.upos], k = it.tn.toUpperCase();
+      if (it.done) { S.upos++; continue; }           // already filled by another PC / person
       const own = notUsps(it.car || "", k);
       if (own) {              // only USPS numbers (9…, USPS carriers) are ever searched on usps.com - in any mode or round
         S.upos++; S.ugated = (S.ugated || 0) + 1; S.total = Math.max(0, (S.total || 0) - 1);
@@ -354,9 +404,11 @@ function nextBatch(site, max) {
     return { items, tns: [...seen], url: USPS_URL + [...seen].join(","), code: "", site: "usps" };
   }
   const items = [], seen = new Set();
+  while (S.pos < S.queue.length && S.queue[S.pos].done) S.pos++;
   const code = S.pos < S.queue.length ? S.queue[S.pos].code || "" : "";
   while (S.pos < S.queue.length) {
     const it = S.queue[S.pos], k = it.tn.toUpperCase();
+    if (it.done) { S.pos++; continue; }              // already filled by another PC / person
     if ((it.code || "") !== code) break;                    // one carrier per Track123 page
     if (!seen.has(k) && seen.size >= BATCH) break;
     seen.add(k); items.push(it); S.pos++;
@@ -412,10 +464,13 @@ function checkFinish() {
   if (probs.length) log(`⚠ ${probs.length} problem shipment(s) - Exception / Failed attempt / Expired / no movement for ${STUCK_DAYS}+ days. See “Problem shipments” in the panel.`, "warn");
   const secs = Math.max(1, Math.round((Date.now() - S.startedAt) / 1000));
   if (S.scheduled) notify("Scheduled tracking run finished", `${S.totals.checked} checked · ${S.totals.delivered} delivered · ${probs.length} problem shipment(s)${S.gaveUp.length ? ` · ${S.gaveUp.length} without a status` : ""}`);
-  log(`✓ Finished - ${S.totals.checked} numbers checked and written in ${secs} s (${Math.round(S.totals.checked / secs * 60)} per minute).`, "ok");
+  const dur = secs >= 3600 ? `${Math.floor(secs / 3600)} h ${Math.round((secs % 3600) / 60)} min` : secs >= 60 ? `${Math.floor(secs / 60)} min ${secs % 60} s` : `${secs} s`;
+  const T = S.totals, perMin = Math.round(T.checked / secs * 60);
+  S.doneText = `Did ${T.checked} in ${dur} (${perMin}/min)`;
+  log(`✓ Finished - did ${T.checked} tracking numbers in ${dur} (${perMin} per minute) · ${T.delivered} delivered · ${T.notDelivered} on the way · ${T.notFound} not found${S.gaveUp.length ? ` · ${S.gaveUp.length} without a status` : ""}${S.othersDid ? ` · ${S.othersDid} already done by another PC` : ""}.`, "ok");
   lightPages([]);
   closeWorkers();
-  S.running = false; S.finishing = false; S.note = "Finished ✓"; S.finishedAt = Date.now(); S.queue = []; S.pos = 0; S.uq = []; S.upos = 0; S.wstate = {};
+  S.running = false; S.finishing = false; S.note = "Finished ✓ - " + (S.doneText || ""); S.finishedAt = Date.now(); S.queue = []; S.pos = 0; S.uq = []; S.upos = 0; S.wstate = {};
   save(true);
 }
 
@@ -766,6 +821,7 @@ async function startRun(m, sender) {
     if (m.fresh > 0) S.req = Object.assign({}, S.req, { base: Object.assign({}, S.req.base, { ensureChecked: true }) });
     S.sheetName = m.sheetName || ""; S.sheetId = m.sheetId || ""; S.rangeText = m.rangeText || "";
     S.running = true; S.startedAt = Date.now(); S.note = "";
+    S.onlyKind = m.onlyBNF ? "bnf" : m.onlyNF ? "nf" : m.onlyBlank ? "blank" : ""; S.othersDid = 0; S.noRowsAction = 0;
     save(true);
     log(`▶ ${m.onlyBNF ? "Blank + Not found run · " : m.onlyNF ? "Not found run · " : m.onlyBlank ? "Blank run · " : ""}${S.tabs} tab${S.tabs > 1 ? "s" : ""} · ${S.sheetName || "sheet"} · ${S.rangeText} - reading the rows…`);
     const r = await readRange(m);
@@ -980,7 +1036,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       }
       return { ok: true };
     });
-    case "take": return go(() => {
+    case "take": return go(async () => {
       const w = S.workers[tabId];
       if (!S.running || !w) return { stop: true };
       if (S.inflight[w]) return Object.assign({ again: true }, S.inflight[w]);      // this tab's batch is not done yet
@@ -1009,6 +1065,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         const left = budgetLeft();
         if (left < 1) { parkUsps("budget"); return { stop: true }; }
         max = left;
+      }
+      if (S.onlyKind) {
+        await precheck(site);
+        if (!S.running || S.paused || S.inflight[w] || !S.workers[tabId]) return S.running ? { wait: true } : { stop: true };
       }
       const b = nextBatch(site, max);
       if (!b) { checkFinish(); return S.running ? { wait: true } : { stop: true }; }

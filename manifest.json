@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ShipCube Tracking Bot",
-  "version": "2.37.1",
+  "version": "2.38.1",
   "description": "Takes 100 tracking numbers at a time from the Google Sheet, tracks them on Track123, writes every status back into the sheet, then does the next 100.",
   "minimum_chrome_version": "116",
   "content_scripts": [
