@@ -1,0 +1,211 @@
+SHIPCUBE TRACKING BOT  (v2.17.0)
+================================
+Takes tracking numbers from the Google Sheet 100 at a time, tracks them on Track123,
+and writes each order's status back into the "Status" column.
+
+INSTALL (each PC)
+  1. chrome://extensions  ->  turn on "Developer mode" (top right)
+  2. "Load unpacked"  ->  choose this "ShipCube Tracking Bot" folder
+  3. Pin the bot icon - clicking it opens the bot in Chrome's SIDE PANEL (on the right, next to any tab -
+     the sheet, Track123, anything). Start it there: the Track123 tabs open and work in the background and
+     only show a small "Rows … · statuses …/100" badge.
+  4. First time only: set up the Google Sheet (GOOGLE SHEET SETUP.txt).
+     After that, open the panel's Settings > Team to share the setup with the other PCs.
+
+HOW IT WORKS (v2)
+  1. ▶ Start reads ALL the rows you chose from the sheet at once (one quick call).
+  2. 1, 2, 4, 6 or 8 Track123 tabs (the 1× 2× 4× 6× 8× buttons) work AT THE SAME TIME. Each tab takes the next
+     free 100 numbers, waits until Track123 shows a status for each one, hands them in and immediately
+     takes the next 100. No tab ever waits for another tab or for the sheet.
+  3. The results are pasted into the sheet in big blocks in the background while the tabs keep tracking.
+  4. Numbers Track123 had no status for yet are tracked again at the end (up to 3 tries).
+  Statuses are read 3 ways at once: Track123's own data, the result cards and its "Copy to Excel" text
+  (one line per number - if that button ever stops working, the bot uses the older "copy all" button instead).
+
+CHOOSE YOUR SHEETS (once)
+  ⚙ Settings > Google Sheet > Your sheets: give each sheet a name and paste its link
+  (open the sheet on the right tab, copy the address from the browser). Then pick it in the panel's Sheet box.
+
+USING IT
+  Which sheet: the "Sheet" box at the top of the panel.
+     - your saved sheets - add them once in ⚙ Settings > Google Sheet > Your sheets:
+       a name + the sheet's link (open the right tab, copy the address). Switch any time with the Sheet box.
+     - no saved sheet = the sheet the script is attached to.
+     - "own web app link" is only for a sheet that has its own copy of the script; leave it empty
+       and the main web app link is used (one script works for all your sheets).
+     Excel files (.XLSX badge next to the name) can't be written: File > Save as Google Sheets first.
+
+  Rows to check  = the ROW NUMBERS on the left edge of the sheet (not the Sr.no column).
+    From [   ] to [   ]   - both empty        = every order, top to bottom, until none are left
+                         - 1 to (empty) or 0  = same: from row 1 down to the last order
+                         - 369 to 869          = top to bottom, rows 369 ... 869 only
+                         - 869 to 369 / 100 to 1 = REVERSE (bottom to top) automatically
+    ⇅ Reverse  - the button turns GREEN when reverse is on. With an empty "to" (or 0) it decides the direction:
+                 Reverse ON + empty From = start at the last row and go up to the top
+                 Reverse ON + 1000 to 0  = from row 1000 up to the top.
+                 With both rows typed, clicking it swaps them (369→869 becomes 869→369).
+    The bot works 100 numbers at a time in that direction and STOPS when no orders are left.
+
+  ▶ Start runs batch after batch until the range is done (Manual mode was removed).
+
+  Track123 speed (drop-down 1× 2× 4× 6× 8× 10×) = how many Track123 tabs work at the same time. 4× is a good default; 6×-8× is faster
+           but Track123 shows its security check more often - solve it in that tab and it carries on.
+           The panel shows the speed (numbers per minute).
+
+  Check: All rows | Only blank | Only "Not found"
+    Only blank      = only rows whose Status cell is EMPTY (fills the gaps left by an earlier run) - Track123
+                      and USPS rows alike. Needs sheet script v11.
+    All rows        = normal run.
+    Only "Not found" = re-checks ONLY rows whose Status says Not found (in the rows you chose),
+                      each with the carrier from its Carrier column. Use it after a normal run.
+
+CARRIER (Carrier column)
+  Fast (default): every number is auto-detected in row order. Numbers Track123 says "Not found" for are
+     checked once more at the end WITH the carrier from your Carrier column (e.g. DHL eCommerce).
+  "Several carriers: choose the carrier first (slower)" (tick box): the sheet is done carrier by carrier,
+     each with its carrier chosen on Track123 (Not found -> one more try with auto-detect).
+  The "Only Not found" run always chooses the carrier first.
+  AUTOMATIC: the bot downloads Track123's own list of ~2,400 carriers and matches your Carrier column to it.
+  "Uni_Uni", "UNIUNI", "uni uni" -> UniUni, "OnTrac" -> OnTrac, "GOFO Express" -> GOFO ... A new carrier in the
+  sheet works by itself - nothing to paste. The log says which carriers were matched, and names any it couldn't
+  recognise (those use auto-detect).
+  ⚙ Settings > Columns > Carrier: the tick box turns it on/off. The list there is only for EXCEPTIONS
+  ("carrier name in sheet = Track123 code", they win over the automatic match, "= auto" = let Track123 detect),
+  e.g. "dhl = dhlglobalmail" because your DHL numbers are DHL eCommerce. Empty carrier cell = auto-detect.
+  ShipCube's main carriers are built in exactly as they come in the sheet:
+    uni_uni -> UniUni · gofo -> GOFO · amazon_shipping_api_v2 -> auto-detect · dhl_ecommerce -> DHL eCommerce US
+    ups -> UPS · fedex -> FedEx
+
+USPS ROWS: TRACK123 FIRST (v2.15, default)
+  "USPS rows:" drop-down in the panel
+    Track123 first, rest on usps.com (default) - USPS rows are tracked on Track123 together with all the other
+        rows (fast, no blocking). Only the USPS numbers Track123 can't do (no status / Not found) go to usps.com
+        at the end - a USPS tab opens only then. Far fewer usps.com pages = usps.com rarely blocks.
+    usps.com only   - every USPS row goes straight to usps.com (the old way).
+    Track123 only   - USPS rows stay on Track123, usps.com is never used.
+  The number next to it = how many USPS tabs (for the usps.com part).
+
+NEW IN v2.17
+  * Second opinion for "USPS Awaiting Item": when usps.com only shows Awaiting Item / label created / a shipping
+    partner (e.g. Amazon), the number is also checked on Track123 (auto-detect) and the status that is further
+    along is written (Track123 "Delivered" via Amazon beats usps.com "Info received"). Only when Track123 tabs are part
+    of the run - in USPS-only test mode (Sites: USPS only + usps.com only) the usps.com status is written as it is.
+  * Never back from Delivered: a row that already says Delivered is never set back to an earlier status
+    (Not found, In transit …) - the log lists the rows it kept. Needs sheet script v14 (it sends the current Status).
+    Only matters when "Skip finished rows" is off (otherwise Delivered rows aren't checked at all).
+  * Problem shipments: after each run the panel shows a yellow box with Exception / Failed attempt / Expired rows and
+    rows with no movement for 7+ days. "Copy list" → paste into any sheet (Row, Tracking, Status, Last event, Problem).
+  * Scheduled runs: ⚙ Settings > Schedule - Run automatically at a time (every day / Mon-Fri / Mon-Sat).
+    It repeats the settings of your LAST ▶ Start (sheet, rows, speed, sites, USPS…) - press ▶ Start once by hand after
+    changing settings. Chrome must be open and the PC awake (the panel can be closed). A notification says when it's done.
+    If a run is already going at that time, the scheduled one is skipped.
+
+USPS PACING (v2.16) - keeps usps.com from blocking
+  * 15-45 s between usps.com pages (different every time), and the number of USPS tabs that work changes
+    from page to page (between 1 and the number you chose).
+  * First blank page (usps.com's bot check): down to 1 USPS tab and a 60-90 s rest. It speeds up again
+    after 5 clean pages.
+  * Blank again right after that rest: usps.com is STOPPED for this run. Track123 carries on; the USPS rows
+    not done stay EMPTY in the sheet - run "Only blank" on the same range later.
+  * Daily limit ("usps.com limit" box under USPS rows, default 3000, 0 = no limit): counted per PC per day.
+    When it's reached, usps.com stops for the day the same way - run "Only blank" tomorrow.
+    (We saw blocks after about 4,700 lookups in one go, so 3000 leaves room. Raise it if it stays fine.)
+
+USPS (usps.com)
+  "USPS rows on usps.com" (tick box, on by default): rows whose Carrier is USPS - also shippo__usps, usps_modern, endicia,
+  stamps.com - are tracked on tools.usps.com instead of Track123, 35 numbers per page, in the same run.
+  A USPS tab opens next to the Track123 tabs (choose 1-6 USPS tabs next to the tick box; they start a few seconds apart).
+  USPS words are written as the same statuses: On the Way -> In transit · USPS Awaiting Item -> Info received ·
+  Out for Delivery · Delivered · Delivery Attempt -> Failed attempt · Alert / Return to Sender -> Exception ·
+  "Tracking Not Available" -> Not found. Date = the date of USPS's latest event.
+  A blank usps.com page = usps.com's bot check is holding that page (reloading it only keeps it blank).
+  The bot hands those 35 rows back at once, that USPS tab rests 45 s, and the rows are opened fresh later - a blank page never uses up a row's tries, so
+  nothing is skipped. The bot also halves the USPS tabs for a while (20 s break) and adds them back when
+  usps.com is fine again - the
+  Track123 tabs carry on.
+  A page that doesn't load at all (keeps spinning): after 35 s (USPS) / 60 s (Track123) the bot opens that tab
+  fresh; still nothing -> it replaces the tab with a brand-new one; still nothing -> its rows are tracked again
+  later and the tab is replaced again. No manual reloading needed. Untick the box to send USPS rows to Track123 as before.
+
+TWO RUNS AT THE SAME TIME (e.g. Track123 rows and USPS rows separately)
+  One Chrome profile runs one job at a time. For two jobs at once use a SECOND CHROME PROFILE (or another PC)
+  with this same bot folder loaded, and the same Settings (Settings > Team > Download team settings, or copy them).
+  Sites switch in the panel:  Both | Track123 only | USPS only
+    Profile 1: Track123 only   -> does every row except USPS rows
+    Profile 2: USPS only       -> sends EVERY row of the range to usps.com, without looking at the Carrier column
+                                  (use it on USPS sheets; on a mixed sheet use Both)
+  The two runs never touch the same rows and both write into the sheet safely (the sheet script lets one write in
+  at a time; the other just waits its turn - "The sheet is busy" is retried by itself for up to ~2 minutes). Same idea for two different sheets: each profile picks its own sheet.
+
+SPEED (v2.10)
+  Skip finished rows (tick box): rows whose Status is Delivered or Expired are not tracked again
+     (change the list in ⚙ Settings > Columns).
+  Light Track123 pages (always on): the bot's Track123 tabs load without pictures/videos/fonts - faster and
+     much less memory with many tabs. Security-check pictures and usps.com are not touched.
+  Final sweep: at the end of every run the bot re-reads the sheet; every row of the run whose Status is still
+     EMPTY is tracked once more (needs sheet script v11+). So no blanks are left behind.
+  Slow numbers: if the last few numbers of a batch don't move for 10 s (USPS: 6 s) the batch is handed in and
+     those few are retried at the end, so a tab never waits long for one number.
+  Sheet script v12 writes faster on big sheets (reads only the rows it writes). Optional but recommended.
+
+STAYING GENTLE WITH TRACK123 (avoid being blocked)
+  Gentle pace (tick box, on by default): each tab waits a random 3-10 s after a batch before the next one.
+  Auto slow-down (always on): if Track123 shows a security check, or more than half a batch comes back empty,
+     the bot halves the number of working tabs and takes a 10-second break.
+     After 4 clean batches it adds one tab back, until it is at full speed again. The panel shows "slowed down".
+  Tips: 4× for everyday runs, 6×-8× only when you must catch up; several smaller runs rather than one huge run.
+
+  ⏸ Pause           no new batches are started; the tabs finish the batch they are on (it is written),
+                    then wait. ▶ Resume carries on exactly where it paused.
+  ■ Stop            stops all tabs at once. Results already handed in are still written.
+  ▶ Continue        (after Stop) carries on with the numbers not done yet - nothing is checked twice.
+  ↺ From the start  forget the unfinished run and begin again at the "From" row.
+
+  "Skip rows already Delivered" (tick box): rows whose Status already says Delivered are not tracked
+  again, so a batch of 100 numbers can cover more than 100 rows - the panel shows how many were skipped.
+  Untick it to re-check every row. Empty tracking numbers are always skipped.
+
+WHAT GETS WRITTEN
+  Status column:  exactly what Track123 shows for that number:
+                  Delivered / In transit / Info received / Out for delivery / Failed attempt /
+                  Exception / Expired / Not found
+                  Every checked row is overwritten with the current status.
+  Want only two words instead? Settings > Columns & status > "Only two words: Delivered / not delivered".
+  Date column:    EVERY checked order gets a date - the date Track123 shows for the latest event
+                  (e.g. 2026-10-16 20:02:18). No date on Track123 (e.g. Not found)? The day it was checked.
+                  It goes into the first "Date" heading to the RIGHT of the status column. If there is none,
+                  the bot adds a "Date" column at the end of the sheet by itself.
+                  A Date column LEFT of the status (like the order date) is never touched.
+  Column names:   tracking_number / Tracking Number, shipping_status / Status ... "_" works like a space.
+  Optional columns - add the heading to the sheet (any column) and the bot fills it too:
+    Track123 Status | Delivered Date | Last Update | Checked On
+
+  A number Track123 has no status for yet (still "Tracking…") is kept aside and tracked AGAIN at the end
+  of the range - up to 3 tries. (If the last few of a batch don't move for 15 s, the tab hands the batch
+  in and those few are retried at the end, so one slow number never holds up the other 99.) Only numbers
+  that still have no status after 3 tries are left unchanged; the log lists their rows.
+  Every write checks the tracking number is still on that row - if someone inserted or sorted rows,
+  the bot finds the number's new row instead of writing into the wrong one.
+
+KEEP WORKING WHILE THE BOT RUNS (v2.12)
+  "Bot tabs in their own window" (tick box, on): the bot's Track123 / USPS tabs open in a SEPARATE Chrome window.
+  Work in your own window as usual - other sheets, your own Track123 or USPS tabs - the bot never uses or
+  moves your tabs. You can minimise the bot's window; just don't close it while it runs.
+  When the job is finished the bot closes its tabs (and its window) by itself. After ■ Stop they stay open,
+  so ▶ Continue can carry on.
+  The bot's tabs also keep their pace in the background now (they wait with the bot's own clock, which Chrome
+  doesn't slow down like it does for tabs you're not looking at).
+  Chrome settings that help on every PC (Settings > Performance):
+    * Memory saver: "Always keep these sites active" -> add  track123.com  and  tools.usps.com
+    * Energy saver: off while the bot runs (on laptops it turns on by itself on battery and freezes tabs)
+
+GOOD TO KNOW
+  * Keep the Track123 tabs open while the bot runs. Closing one: its batch goes back in the queue and the
+    other tabs carry on.
+  * If Track123 shows a security check (captcha), the bot brings the Track123 tab to the front and waits
+    until you solve it. (Track123 leaves an old, already-passed check hidden in the page - the bot ignores it.)
+  * Tracking numbers like 9361289768766295793979 must be stored as text. If a cell shows 9.36E+21,
+    format the column as Plain text and type the number again - the bot skips and reports those rows.
+  * Tracking numbers with _ or other symbols (e.g. 93346208455000455866603_1) are skipped and listed in the
+    log - Track123 only accepts letters, numbers and - , and one bad number would stop the whole batch.
+    Their rows are left unchanged.

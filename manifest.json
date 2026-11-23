@@ -1,0 +1,87 @@
+{
+  "manifest_version": 3,
+  "name": "ShipCube Tracking Bot",
+  "version": "2.37.1",
+  "description": "Takes 100 tracking numbers at a time from the Google Sheet, tracks them on Track123, writes every status back into the sheet, then does the next 100.",
+  "minimum_chrome_version": "116",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.track123.com/*",
+        "https://track123.com/*"
+      ],
+      "js": [
+        "hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.track123.com/*",
+        "https://track123.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://tools.usps.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "bg.js"
+  },
+  "host_permissions": [
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*",
+    "https://www.track123.com/*",
+    "https://*.cloudfunctions.net/*",
+    "https://identitytoolkit.googleapis.com/*",
+    "https://securetoken.googleapis.com/*"
+  ],
+  "permissions": [
+    "storage",
+    "tabs",
+    "sidePanel",
+    "alarms",
+    "declarativeNetRequest",
+    "notifications"
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png"
+    },
+    "default_title": "ShipCube Tracking Bot - open the panel"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "team-settings.json",
+        "icon48.png"
+      ],
+      "matches": [
+        "https://www.track123.com/*",
+        "https://track123.com/*",
+        "https://tools.usps.com/*"
+      ]
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
+}

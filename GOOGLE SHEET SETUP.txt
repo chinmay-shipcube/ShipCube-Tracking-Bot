@@ -1,0 +1,33 @@
+GOOGLE SHEET SETUP (one time, ~5 minutes)
+==========================================
+ONE script link works for ALL your Google Sheets (script v3+): set it up once in any sheet,
+then start the bot from whichever sheet you want - it writes into the sheet/tab you started it on.
+The account that deploys the script must be able to edit those sheets.
+
+The bot reads the "Tracking Number" column and writes into the "Status" column.
+It finds them by their heading (your sheet has them on row 2 - that's fine, any of the first 5 rows works).
+
+1. Open the Google Sheet (e.g. "Clone Tracking data").  Menu: Extensions > Apps Script.
+2. Delete everything in the editor, paste ALL of "Tracking_Sheet_Script.gs.txt".
+   (Optional: change TOKEN = 'shipcube' to your own password.)  Click Save (disk icon).
+3. Deploy > New deployment > gear icon > Web app
+     Execute as:      Me
+     Who has access:  Anyone
+   Click Deploy, allow the permissions (your own account), COPY the "Web app" link (ends with /exec).
+4. Open track123.com > ShipCube Tracking Bot panel > ⚙ Settings > Google Sheet
+     - paste the link, Password = the TOKEN (default: shipcube)
+     - Save, then "Test connection" -> it shows:  tracking: F = Tracking Number,  status: G = Status,
+       and the data rows (e.g. 3 -> 869).
+5. Settings > Team > "Download team settings" -> put team-settings.json in this folder and copy
+   the folder to the other PCs (replace the empty team-settings.json). They are set up automatically.
+
+The orders are on another tab?  Settings > Google Sheet > Tab name.
+Renamed a heading?  Settings > Columns & status > type the column letter (e.g. F and G).
+
+UPDATING TO SCRIPT v14 (v14 = a row that says Delivered is never set back to an earlier status; v13 = no more 'The sheet is busy' when a run starts / two bots run; v12 = faster writing on big sheets; v11 = 'Only blank' run; v9+ = Carrier column / 'Only Not found')
+  Paste the new script, Save, Deploy > Manage deployments > edit (pencil) > Version: New version > Deploy.
+  Google asks for permission again (the script may now open your other sheets) - allow it.
+
+UPDATING THE SCRIPT LATER
+  Paste the new script, Save, then Deploy > Manage deployments > edit (pencil) >
+  Version: New version > Deploy.  The link stays the same.

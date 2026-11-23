@@ -1,0 +1,341 @@
+/**
+ * ShipCube Tracking Bot -> Google Sheet   (v15)
+ * Paste this whole file into your sheet: Extensions > Apps Script (replace everything), Save,
+ * then Deploy > New deployment > Web app (Execute as: Me, Who has access: Anyone) and copy the link.
+ * Updating later: Deploy > Manage deployments > edit (pencil) > Version: New version > Deploy (link stays the same).
+ *
+ * WHAT IT DOES
+ *   The bot asks for the next tracking numbers (up to 100) in the row range you chose in the bot
+ *   (e.g. 369 -> 869 top to bottom, or 869 -> 369 bottom to top) and writes the Track123 status
+ *   back into the "Status" column of the same rows.
+ *
+ * ONE SCRIPT FOR ALL YOUR SHEETS (v3)
+ *   The bot tells the script which Google Sheet (and which tab) it was started on, so this one
+ *   web app link works for every Google Sheet the deploying account can edit.
+ *   Excel files (.xlsx opened in Google Sheets) can't be written by Apps Script:
+ *   File > Save as Google Sheets first, and run the bot on that copy.
+ *
+ * COLUMNS - found by their heading (any of the first 5 rows), any order, "_" counts as a space:
+ *   Tracking Number   (also: tracking_number, Tracking, Tracking No, Tracking #, AWB)
+ *   Status            (also: shipping_status, Order Status, Delivery Status, Tracking Status)
+ *   Date              ALWAYS filled: the first "Date" heading to the RIGHT of Status gets the date Track123
+ *                     shows for the latest event. No such column? A "Date" column is added at the end.
+ *                     (a Date column left of Status, like an order date, is never touched)
+ *   Carrier           optional - (also: Shipper, Courier) the bot then picks that carrier on Track123
+ *                     instead of auto-detect (only read, never written)
+ *   Checked On        when the bot last checked the row. Added at the end automatically when the bot's
+ *                     "Skip rows checked in the last ... hours" is on (v10) - those rows are then skipped.
+ *   Optional - only filled if you add these headings:
+ *     Delivered Date | Last Update | Checked On | Track123 Status
+ *   The bot's Settings can also force a column letter (e.g. F / G) if you ever rename a heading.
+ */
+
+const TOKEN = 'shipcube';   // password - must match "Password" in the bot's Settings > Google Sheet
+const SHEET_NAME = '';      // tab to use; leave '' for the FIRST tab (the bot can also send a tab name)
+
+const COLUMNS = {
+  tracking:   ['tracking number', 'tracking', 'tracking no', 'tracking no.', 'tracking #', 'tracking id', 'awb', 'tracking numbers', 'awb number', 'tracking code'],
+  status:     ['status', 'order status', 'delivery status', 'tracking status', 'shipment status', 'shipping status'],
+  date:       ['date', 'tracking date', 'status date', 'event date', 'last event date', 'latest date', 'last update date', 'track date'],
+  delivered:  ['delivered date', 'delivery date', 'delivered on', 'delivered at'],
+  lastUpdate: ['last update', 'last event', 'latest update', 'last tracking'],
+  checked:    ['checked on', 'last checked', 'checked at', 'bot checked'],
+  t123:       ['track123 status', 'detailed status', 'carrier status'],
+  carrier:    ['carrier', 'shipper', 'courier', 'shipping carrier', 'carrier name', 'shipping company', 'carrier code', 'logistics'],
+};
+
+// which spreadsheet: the one the bot was started on (sheetId), else the one this script is attached to
+function book_(data) {
+  let act = null;
+  try { act = SpreadsheetApp.getActiveSpreadsheet(); } catch (e) {}
+  if (!data.sheetId || (act && act.getId() === data.sheetId)) {
+    if (!act) throw new Error('Start the bot from the Google Sheet (the script is not attached to a sheet).');
+    return act;
+  }
+  try { return SpreadsheetApp.openById(data.sheetId); }
+  catch (e) {
+    throw new Error("Can't open this spreadsheet. If it is an Excel file (.XLSX next to the name), use File > Save as Google Sheets " +
+      'and run the bot on the new Google Sheet. Otherwise the account that deployed the script needs edit access to it.');
+  }
+}
+// which tab: the one open in the browser (gid), else the tab name from Settings, else SHEET_NAME / the first tab
+function sheet_(ss, data) {
+  if (data.gid !== undefined && data.gid !== null && data.gid !== '') {
+    const t = ss.getSheets().filter(function (s) { return String(s.getSheetId()) === String(data.gid); })[0];
+    if (t) return t;
+  }
+  if (data.tab) return ss.getSheetByName(data.tab);
+  return SHEET_NAME ? ss.getSheetByName(SHEET_NAME) : ss.getSheets()[0];
+}
+
+function colNum_(letter) {
+  const s = String(letter || '').trim().toUpperCase();
+  if (!/^[A-Z]{1,3}$/.test(s)) return 0;
+  let n = 0;
+  for (let i = 0; i < s.length; i++) n = n * 26 + (s.charCodeAt(i) - 64);
+  return n;
+}
+function colLetter_(n) {
+  let s = '';
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+// heading row + column numbers; letters sent by the bot win over headings
+function findColumns_(sh, force) {
+  const lastCol = Math.max(sh.getLastColumn(), 1);
+  const rows = Math.min(5, Math.max(sh.getLastRow(), 1));
+  const grid = sh.getRange(1, 1, rows, lastCol).getDisplayValues();
+  let best = { headerRow: 1, cols: {}, names: {} };
+  grid.forEach(function (cells, r) {
+    const cols = {}, names = {};
+    cells.forEach(function (h, c) {
+      const name = String(h).toLowerCase().replace(/[_\-]+/g, ' ').replace(/[:*]+$/, '').replace(/\s+/g, ' ').trim();
+      Object.keys(COLUMNS).forEach(function (f) {
+        if (f === 'date') return;    // chosen below
+        if (!cols[f] && COLUMNS[f].indexOf(name) !== -1) { cols[f] = c + 1; names[f] = String(h).trim(); }
+      });
+    });
+    // "Date" = the first date heading to the RIGHT of Status (an order date further left is never touched)
+    if (cols.status) cells.forEach(function (h, c) {
+      const name = String(h).toLowerCase().replace(/[_\-]+/g, ' ').replace(/[:*]+$/, '').replace(/\s+/g, ' ').trim();
+      if (!cols.date && c + 1 > cols.status && COLUMNS.date.indexOf(name) !== -1) { cols.date = c + 1; names.date = String(h).trim(); }
+    });
+    const score = (cols.tracking ? 10 : 0) + (cols.status ? 10 : 0) + Object.keys(cols).length;
+    const bestScore = (best.cols.tracking ? 10 : 0) + (best.cols.status ? 10 : 0) + Object.keys(best.cols).length;
+    if (score > bestScore) best = { headerRow: r + 1, cols: cols, names: names };
+  });
+  force = force || {};
+  ['tracking', 'status', 'date', 'delivered', 'lastUpdate', 'checked', 't123'].forEach(function (f) {
+    const n = colNum_(force[f]);
+    if (n) { best.cols[f] = n; best.names[f] = 'column ' + colLetter_(n); }
+  });
+  return best;
+}
+
+// "TBA332865088110 " -> "TBA332865088110"; headings / blanks / broken numbers -> ''
+function cleanTn_(v) {
+  const s = String(v == null ? '' : v).replace(/\s+/g, '').trim();
+  if (!s || !/\d/.test(s)) return '';
+  return s;
+}
+function looksBroken_(s) { return /^\d+(\.\d+)?E\+\d+$/i.test(s); }   // 9.36129E+21 - the number lost its digits
+
+function doPost(e) {
+  // v13: only WRITES wait for their turn (lock). Reading the rows (start of a run, the final check) and
+  // "Test connection" never wait, so a run starting or a second bot never gets "The sheet is busy".
+  let data = {};
+  try { data = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { return reply_({ ok: false, error: 'Bad request' }); }
+  if (data.token !== TOKEN) return reply_({ ok: false, error: 'Wrong password (TOKEN)' });
+  const writes = data.action === 'update';
+  const lock = writes ? LockService.getScriptLock() : null;
+  if (lock && !lock.tryLock(25000)) return reply_({ ok: false, busy: true, error: 'The sheet is busy - try again' });   // never an HTML error page
+  try {
+    const ss = book_(data);
+    const sh = sheet_(ss, data);
+    if (!sh) return reply_({ ok: false, error: 'Tab "' + (data.tab || SHEET_NAME) + '" not found in "' + ss.getName() + '"' });
+    const map = findColumns_(sh, data.cols);
+    const firstRow = map.headerRow + 1;
+    const lastRow = sh.getLastRow();
+
+    if (data.action === 'ping') {
+      const found = {};
+      Object.keys(map.cols).forEach(function (f) { found[f] = colLetter_(map.cols[f]) + ' = ' + map.names[f]; });
+      if (!map.cols.date && map.cols.status) found.date = colLetter_(sh.getLastColumn() + 1) + ' = Date (will be added)';
+      return reply_({ ok: true, file: ss.getName(), sheet: sh.getName(), headerRow: map.headerRow, firstRow: firstRow, lastRow: lastRow, columns: found, script: 13 });
+    }
+    if (!map.cols.tracking) return reply_({ ok: false, error: 'No "Tracking Number" column found (first 5 rows). Add the heading or set the column letter in the bot.' });
+    if (!map.cols.status) return reply_({ ok: false, error: 'No "Status" column found (first 5 rows). Add the heading or set the column letter in the bot.' });
+    if (data.action === 'next' || data.action === 'list') return reply_(next_(sh, map, firstRow, lastRow, data));
+    if (data.action === 'rows') return reply_(rows_(sh, map, firstRow, lastRow, data));   // v15: every column, for the database
+    if (data.action === 'update') return reply_(update_(sh, map, firstRow, lastRow, data));
+    return reply_({ ok: false, error: 'Unknown action' });
+  } catch (err) {
+    return reply_({ ok: false, error: String(err) });
+  } finally {
+    if (lock) lock.releaseLock();
+  }
+}
+
+/**
+ * Next batch. data.from / data.to = sheet row numbers, data.dir = 1 (top to bottom) or -1 (reverse).
+ *   from & to both given: from > to = reverse, from < to = top to bottom.
+ *   to blank (or 0): go to the end in that direction (last row, or the first row when reversed).
+ *   from blank: the first row (or the last row when reversed).
+ * Rows with an empty tracking number, or whose Status is in data.skip (e.g. "Delivered"), are passed over.
+ */
+function next_(sh, map, firstRow, lastRow, data) {
+  const limit = data.action === 'list' ? 1e9 : Math.max(1, Math.min(100, +data.limit || 100));   // 'list' = the whole range in one go
+  if (lastRow < firstRow) return { ok: true, items: [], done: true, from: firstRow, to: firstRow, nextRow: firstRow, remaining: 0, firstRow: firstRow, lastRow: lastRow };
+  const clamp = function (r) { return Math.max(firstRow, Math.min(lastRow, r)); };
+  const f0 = +data.from || 0, t0 = +data.to || 0;
+  const dir = f0 && t0 ? (f0 > t0 ? -1 : 1) : (+data.dir === -1 ? -1 : 1);
+  const from = clamp(f0 || (dir > 0 ? firstRow : lastRow));
+  const to = clamp(t0 || (dir > 0 ? lastRow : firstRow));
+  if ((to - from) * dir < 0) return { ok: true, items: [], done: true, from: from, to: to, dir: dir, nextRow: from, remaining: 0, firstRow: firstRow, lastRow: lastRow };
+  const lo = Math.min(from, to), hi = Math.max(from, to);
+  let cursor = data.cursor ? +data.cursor : from;
+  const base = { ok: true, from: from, to: to, dir: dir, firstRow: firstRow, lastRow: lastRow };
+  if (cursor < lo || cursor > hi) return Object.assign(base, { items: [], done: true, nextRow: cursor, remaining: 0 });
+
+  const n = hi - lo + 1;
+  const tns = sh.getRange(lo, map.cols.tracking, n, 1).getDisplayValues();
+  const sts = sh.getRange(lo, map.cols.status, n, 1).getDisplayValues();
+  const cars = data.action === 'list' && map.cols.carrier ? sh.getRange(lo, map.cols.carrier, n, 1).getDisplayValues() : null;   // the bot picks the carrier on Track123
+  // "Skip rows checked in the last N hours": compare the Checked On cell with the bot's clock (both as text, so time zones don't matter)
+  const freshH = +data.fresh || 0;
+  const chk = freshH > 0 && map.cols.checked ? sh.getRange(lo, map.cols.checked, n, 1).getValues() : null;
+  const tz = chk ? sh.getParent().getSpreadsheetTimeZone() : '';
+  const nowMin = freshH > 0 ? minutesOf_(data.now) : null;
+  const skip = (data.skip || []).map(function (s) { return String(s).toLowerCase().trim(); }).filter(String);
+  const only = (data.only || []).map(function (s) { return String(s).toLowerCase().trim(); }).filter(String);
+  const items = [], uniq = {}, broken = [], invalid = [];
+  let skipped = 0, nUniq = 0, skippedFresh = 0;
+  let nextRow = to + dir, remaining = 0, full = false;
+  for (let r = cursor; dir > 0 ? r <= to : r >= to; r += dir) {
+    const i = r - lo;
+    const tn = cleanTn_(tns[i][0]);
+    if (!tn) continue;
+    if (looksBroken_(tn)) { if (!full) broken.push(r); continue; }
+    if (!/^[A-Za-z0-9-]{5,50}$/.test(tn)) { if (!full) invalid.push(r); continue; }   // Track123 refuses _ . / etc. - the whole batch would fail
+    if (skip.indexOf(String(sts[i][0]).toLowerCase().trim()) !== -1) { if (!full) skipped++; continue; }
+    if (only.length && only.indexOf(String(sts[i][0]).toLowerCase().trim()) === -1) continue;    // "Not found run": only these statuses
+    if (data.onlyBlank && String(sts[i][0]).trim() !== '') continue;                  // "Blank run": only rows with an empty Status
+    if (chk && nowMin !== null) {
+      const c = chk[i][0];
+      const m = minutesOf_(c instanceof Date ? Utilities.formatDate(c, tz, 'yyyy-MM-dd HH:mm') : c);
+      if (m !== null && nowMin - m >= 0 && nowMin - m < freshH * 60) { if (!full) skippedFresh++; continue; }
+    }
+    if (full) { remaining++; continue; }
+    const key = tn.toUpperCase();
+    if (!uniq[key] && nUniq >= limit) { full = true; nextRow = r; remaining++; continue; }
+    if (!uniq[key]) { uniq[key] = true; nUniq++; }
+    // v14: 'list' also sends the current Status, so the bot never sets a Delivered row back to an earlier status
+    items.push(data.action === 'list' ? { row: r, tn: tn, carrier: cars ? String(cars[i][0]).trim() : '', status: String(sts[i][0]) } : { row: r, tn: tn, status: String(sts[i][0]) });
+  }
+  return Object.assign(base, { items: items, nextRow: nextRow, remaining: remaining, broken: broken, invalid: invalid, skipped: skipped, skippedFresh: skippedFresh, freshApplied: freshH > 0, freshNoColumn: freshH > 0 && !map.cols.checked, onlyApplied: true, blankApplied: true, done: !items.length });
+}
+
+/** Write statuses. Each item: { row, tn, status, t123, delivered, last, checked } */
+// no "Date" column right of Status yet -> add one at the end of the heading row (same look as the Status heading)
+function ensureDateColumn_(sh, map) { ensureColumn_(sh, map, 'date', 'Date'); }
+function ensureColumn_(sh, map, f, title) {
+  if (map.cols[f]) return;
+  const col = sh.getLastColumn() + 1;
+  if (col > sh.getMaxColumns()) sh.insertColumnAfter(sh.getMaxColumns());
+  const cell = sh.getRange(map.headerRow, col);
+  try { sh.getRange(map.headerRow, map.cols.status).copyTo(cell, { formatOnly: true }); } catch (e) {}
+  cell.setValue(title);
+  map.cols[f] = col; map.names[f] = title + ' (added)';
+}
+
+/**
+ * 'rows' (v15): EVERY column of the given sheet rows, as the sheet shows them (text).
+ * The bot sends data.rows = [row numbers] after it has written the statuses; the result goes to the database.
+ */
+function rows_(sh, map, firstRow, lastRow, data) {
+  const lastCol = Math.max(sh.getLastColumn(), 1);
+  const heads = [], seen = {};
+  sh.getRange(map.headerRow, 1, 1, lastCol).getDisplayValues()[0].forEach(function (h, c) {
+    let k = String(h).trim() || ('column ' + colLetter_(c + 1));
+    if (seen[k]) k = k + ' (' + colLetter_(c + 1) + ')';
+    seen[k] = true; heads.push(k);
+  });
+  const want = (data.rows || []).map(Number).filter(function (r) { return r >= firstRow && r <= lastRow; });
+  if (!want.length) return { ok: true, headers: heads, rows: [] };
+  const lo = Math.min.apply(null, want), hi = Math.max.apply(null, want);
+  const grid = sh.getRange(lo, 1, hi - lo + 1, lastCol).getDisplayValues();
+  const out = want.map(function (r) {
+    const cells = grid[r - lo], d = {};
+    heads.forEach(function (h, c) { d[h] = String(cells[c] == null ? '' : cells[c]); });
+    return {
+      row: r,
+      tn: cleanTn_(cells[map.cols.tracking - 1]),
+      status: String(cells[map.cols.status - 1] || '').trim(),
+      date: map.cols.date ? String(cells[map.cols.date - 1] || '') : '',
+      carrier: map.cols.carrier ? String(cells[map.cols.carrier - 1] || '').trim() : '',
+      data: d
+    };
+  });
+  return { ok: true, headers: heads, rows: out };
+}
+
+function update_(sh, map, firstRow, lastRow, data) {
+  const items = data.items || [];
+  if (items.some(function (it) { return it.date; })) ensureDateColumn_(sh, map);
+  if (data.ensureChecked && items.length) ensureColumn_(sh, map, 'checked', 'Checked On');
+  let written = 0, moved = 0;
+  const missing = [];
+  // FAST (v12): read only the rows this write touches; the whole tracking column only if a number moved
+  let index = {}, tnOfRow = {};
+  const readRows_ = function (a, b) {
+    index = {}; tnOfRow = {};
+    if (b < a) return;
+    const v = sh.getRange(a, map.cols.tracking, b - a + 1, 1).getDisplayValues();
+    v.forEach(function (x, i) {
+      const k = cleanTn_(x[0]).toUpperCase();
+      if (!k) return;
+      tnOfRow[a + i] = k;
+      (index[k] = index[k] || []).push(a + i);
+    });
+  };
+  const want = items.map(function (it) { return +it.row; }).filter(function (r) { return r >= firstRow && r <= lastRow; });
+  if (want.length) readRows_(Math.min.apply(null, want), Math.max.apply(null, want));
+  const allHere = items.every(function (it) { return !it.tn || !it.status || (it.row && tnOfRow[it.row] === String(it.tn).toUpperCase()); });
+  if (!allHere && lastRow >= firstRow) readRows_(firstRow, lastRow);     // someone inserted/sorted rows: look everywhere
+  const cellsOf = {};   // field -> { row: value }
+  const put = function (r, f, v) {
+    if (!map.cols[f] || v === undefined || v === null || v === '') return;
+    (cellsOf[f] = cellsOf[f] || {})[r] = v;
+  };
+  items.forEach(function (it) {
+    const key = String(it.tn || '').toUpperCase();
+    if (!key || !it.status) return;
+    let rows;
+    if (it.row && tnOfRow[it.row] === key) rows = [it.row];
+    else { rows = index[key] || []; if (rows.length) moved++; }     // someone inserted/sorted rows: found it again
+    if (!rows.length) { missing.push(it.tn); return; }
+    rows.forEach(function (r) {
+      put(r, 'status', it.status);
+      put(r, 't123', it.t123);
+      put(r, 'delivered', it.delivered);
+      put(r, 'lastUpdate', it.last);
+      put(r, 'checked', it.checked);
+      put(r, 'date', it.date);
+      written++;
+    });
+  });
+  // Paste in as few calls as possible, per column:
+  //   rows next to each other -> one block "paste" (setValues) per run of rows, e.g. 100 rows = 1 call
+  //   rows spread out (delivered rows skipped in between) -> one call per distinct value (all "In transit" cells at once)
+  // Cells between the batch's rows are never touched.
+  Object.keys(cellsOf).forEach(function (f) {
+    const col = map.cols[f], byRow = cellsOf[f];
+    const rows = Object.keys(byRow).map(Number).sort(function (a, b) { return a - b; });
+    const runs = [];
+    rows.forEach(function (r) { const last = runs[runs.length - 1]; if (last && r === last[last.length - 1] + 1) last.push(r); else runs.push([r]); });
+    const byValue = {};
+    rows.forEach(function (r) { (byValue[byRow[r]] = byValue[byRow[r]] || []).push(colLetter_(col) + r); });
+    if (runs.length <= Object.keys(byValue).length) {
+      runs.forEach(function (run) { sh.getRange(run[0], col, run.length, 1).setValues(run.map(function (r) { return [byRow[r]]; })); });
+    } else {
+      Object.keys(byValue).forEach(function (v) {
+        const cells = byValue[v];
+        for (let k = 0; k < cells.length; k += 400) sh.getRangeList(cells.slice(k, k + 400)).setValue(v);
+      });
+    }
+  });
+  SpreadsheetApp.flush();
+  return { ok: true, written: written, moved: moved, missing: missing };
+}
+
+// "2026-10-21 15:34" -> minutes (null if it isn't a date)
+function minutesOf_(v) {
+  const m = String(v == null ? '' : v).match(/(\d{4})-(\d{1,2})-(\d{1,2})[ T]+(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return Math.floor(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 60000);
+}
+
+function reply_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
