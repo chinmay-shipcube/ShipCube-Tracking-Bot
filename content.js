@@ -440,7 +440,11 @@
     };
     try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme); } catch {}
     applyTheme();
-    $('[data-a="tabsel"]').onchange = async (e) => { cfg.tabs = +e.target.value || 2; await saveCfg(); render(); };
+    $('[data-a="tabsel"]').onchange = async (e) => {
+      cfg.tabs = +e.target.value || 2; await saveCfg();
+      if (job.running) await bg({ type: "setTabs", tabs: cfg.tabs });     // during a run: tabs are added / closed straight away
+      render();
+    };
     panel.querySelectorAll("[data-site]").forEach((b) => b.onclick = async () => { cfg.sites = b.dataset.site; if (cfg.sites === "usps") cfg.uspsSite = true; await saveCfg(); await bg({ type: "resetRun" }); render(); });
     panel.querySelectorAll("[data-what]").forEach((b) => b.onclick = async () => { cfg.onlyNF = b.dataset.what === "nf"; cfg.onlyBlank = b.dataset.what === "blank"; cfg.onlyBNF = b.dataset.what === "bnf"; await saveCfg(); await bg({ type: "resetRun" }); render(); });
     const rangeChanged = async () => {
@@ -558,7 +562,7 @@
     const run = !!job.running;
     const done = (job.totals && job.totals.checked) || 0;
     const tabs = cfg.tabs || 2;
-    { const ts = $('[data-a="tabsel"]'); if (document.activeElement !== ts) ts.value = String([1, 2, 4, 6, 8, 10].includes(tabs) ? tabs : 2); ts.disabled = run; }
+    { const ts = $('[data-a="tabsel"]'); if (document.activeElement !== ts) ts.value = String([1, 2, 4, 6, 8, 10].includes(tabs) ? tabs : 2); ts.disabled = run && cfg.sites === "usps"; }
     panel.querySelectorAll("[data-site]").forEach((b) => { b.classList.toggle("on", b.dataset.site === (cfg.sites || "")); b.disabled = run || (cfg.useCarrier === false && b.dataset.site === "track"); });
     panel.querySelectorAll("[data-what]").forEach((b) => { b.classList.toggle("on", b.dataset.what === (cfg.onlyBNF ? "bnf" : cfg.onlyNF ? "nf" : cfg.onlyBlank ? "blank" : "all")); b.disabled = run; });
     const rate = job.startedAt && done ? Math.round(done / Math.max(1, ((run ? Date.now() : job.finishedAt || Date.now()) - job.startedAt) / 60000)) : 0;
@@ -713,7 +717,7 @@ $('[data-a="gentle"]').checked = cfg.gentle !== false; $('[data-a="cfirst"]').ch
   const bodyText = () => { const el = document.body || document.documentElement; return (el && el.innerText) || ""; };
   const pageTextLen = () => Math.max(0, bodyText().trim().length - ((panel && panel.innerText) || "").trim().length);
   const pageBlank = () => pageTextLen() < 40;
-  let engineOn = false, navigating = false, lateSent = false, okSent = false;
+  let engineOn = false, navigating = false, lateSent = false, okSent = false, harvestNow = false;   // harvestNow: ■ Stop - hand in what this page has right now
   const brkJit = Math.round(Math.random() * 6000);
   function setCd(text) { if (!panel) return; const el = $('[data-a="cd"]'); el.style.display = ""; $('[data-a="cdt"]').textContent = text; }
   function hideCd() { if (panel) $('[data-a="cd"]').style.display = "none"; }
@@ -784,15 +788,27 @@ $('[data-a="gentle"]').checked = cfg.gentle !== false; $('[data-a="cfirst"]').ch
     await bg({ type: "result", writes: [], counts: {}, unresolved: b.items.map((it) => Object.assign({}, it, SITE === "usps" ? { blank: (it.blank || 0) + 1 } : { tries: (it.tries || 0) + 1 })) });
   }
   // wait until EVERY number of the batch has its status (or the time limit), then hand the results in
+  // 420 + ZIP + USPS number (420891359261290…): Track123 sometimes answers for the number WITHOUT the "420 + ZIP"
+  // part (9261290…), so the bot didn't recognise it and the row was left blank. Both forms count as the same number.
+  const tnKey = (t) => { t = String(t || "").replace(/\s+/g, "").toUpperCase(); const m = t.match(/^420\d{5}(?:\d{4})?(9[1-5]\d{18,26})$/); return m ? m[1] : t; };
+  function getT(map, tn) {
+    if (!map) return undefined;
+    tn = String(tn || "").toUpperCase();
+    if (map.has(tn)) return map.get(tn);
+    const k = tnKey(tn);
+    for (const [x, v] of map) if (tnKey(x) === k) return v;
+    return undefined;
+  }
   async function track(b) {
     bg({ type: "state", state: "tracking" });
     const t0 = Date.now(), limit = WAIT_S * 1000;
     let paused = 0, clickedTrack = false, captchaSince = 0, alerted = false, sawCaptcha = false, last = -1, lastCopy = 0, lastHb = 0, lastChange = Date.now();
-    const known = (t, screen) => apiStatus(results.get(t)) || screen.has(t) || copied.has(t);
+    const known = (t, screen) => apiStatus(getT(results, t)) || getT(screen, t) !== undefined || getT(copied, t) !== undefined;
     while (true) {
       await sleep(400);
       if (!job.running) { hideCd(); return false; }
       if (Date.now() - lastHb > 10000) { lastHb = Date.now(); bg({ type: "hb" }); }
+      if (harvestNow) break;          // ■ Stop: write the statuses this page already shows, the rest go back to the queue
       let screen = screenStatuses();
       // Track123's own "Copy to Excel" text has every number at once - read it every ~2 s while numbers are missing
       if (Date.now() - t0 > 1500 && Date.now() - lastCopy > 2000 && b.tns.some((t) => !known(t, screen))) {
@@ -818,9 +834,13 @@ $('[data-a="gentle"]').checked = cfg.gentle !== false; $('[data-a="cfirst"]').ch
         const btn = [...document.querySelectorAll("button, a, div[role=button], [class*=track-btn]")].find((x) => !x.closest("#sctrk-bot") && /^\s*track\s*→?\s*$/i.test(x.textContent || "") && x.offsetParent);
         if (btn) { btn.click(); clickedTrack = true; }
       }
-      if (Date.now() - t0 - paused > limit) break;
-      // most are done and the last few haven't moved for 15 s: hand these in, the stragglers are retried at the end
-      if (have >= b.tns.length * 0.8 && Date.now() - lastChange > 10000) break;
+      // the numbers still missing: is Track123 still asking the carrier for them (Amazon TBA… often takes 1-2 min)?
+      const missing = b.tns.filter((t) => !known(t, screen));
+      const asking = missing.filter((t) => { const r = getT(results, t); return r && r.querying; }).length;
+      // while Track123 is still asking: wait up to 3 min for the batch (it fills them in by itself) - otherwise 90 s
+      if (Date.now() - t0 - paused > (asking ? Math.max(limit, 180000) : limit)) break;
+      // most are done and the last few haven't moved for 35 s AND Track123 isn't asking for them any more: hand these in
+      if (have >= b.tns.length * 0.8 && Date.now() - lastChange > (asking ? 90000 : 35000)) break;
     }
     await copyAll();     // one last full read (statuses + dates of every number)
     hideCd();
@@ -831,8 +851,8 @@ $('[data-a="gentle"]').checked = cfg.gentle !== false; $('[data-a="cfirst"]').ch
     const rowsByTn = new Map();
     b.items.forEach((it) => { const k = it.tn.toUpperCase(); if (!rowsByTn.has(k)) rowsByTn.set(k, []); rowsByTn.get(k).push(it); });
     for (const tn of b.tns) {
-      const rec = results.get(tn), cp = copied.get(tn);
-      const det = okStatus(screen.get(tn)) || okStatus(cp && cp.status) || okStatus(apiStatus(rec));     // what Track123 shows first
+      const rec = getT(results, tn), cp = getT(copied, tn);
+      const det = okStatus(getT(screen, tn)) || okStatus(cp && cp.status) || okStatus(apiStatus(rec));     // what Track123 shows first
       // usps.com said only "Awaiting Item" / a shipping partner has it: Track123 (auto-detect) gave a second opinion.
       // Keep whichever is further along (e.g. Track123 "Delivered" via Amazon beats usps.com "Info received").
       const xc = rowsByTn.get(tn)[0].xcheck;
@@ -868,8 +888,21 @@ $('[data-a="gentle"]').checked = cfg.gentle !== false; $('[data-a="cfirst"]').ch
         delivered: isDel && rec ? rec.deliveryTime || rec.lastTime || "" : "",
         last: lastEv, checked: now(),
         // every order gets a date: the one Track123 shows, else its latest event / delivery time, else the day it was checked
-        date: dates.get(tn) || (cp && cp.date) || (rec && (rec.lastTime || rec.deliveryTime)) || now(),
+        date: getT(dates, tn) || (cp && cp.date) || (rec && (rec.lastTime || rec.deliveryTime)) || now(),
       }));
+    }
+    if (noStatus) {          // say WHY a number got no status (so a pattern can be fixed)
+      const why = [];
+      for (const tn of b.tns) {
+        if (why.length >= 4) break;
+        const rec = getT(results, tn), cp = getT(copied, tn);
+        if (okStatus(getT(screen, tn)) || okStatus(cp && cp.status) || okStatus(apiStatus(rec))) continue;
+        const card = [...document.querySelectorAll(".result-list-item-container")].find((k) => ((k.querySelector(".tracking-no-text") || {}).textContent || "").replace(/\s+/g, "").toUpperCase() === tn);
+        const shown = card ? ((card.querySelector(".status-text") || {}).textContent || "").replace(/\s+/g, " ").trim() : "";
+        const r = !rec ? "no reply from Track123" : rec.querying ? "Track123 still asking the carrier" : `Track123 status “${rec.transitStatus || ""}${rec.main ? " / " + rec.main : ""}”`;
+        why.push(`${tn}: ${r}${card ? `, page shows “${shown || "nothing"}”` : ", not on the page"}`);
+      }
+      if (why.length) log(`No status for: ${why.join(" · ")}`, "warn");
     }
     if (!writes.length && apiErrors.length) log(`Track123 said: ${apiErrors[apiErrors.length - 1].msg || apiErrors[apiErrors.length - 1].code}`, "bad");
     const summ = Object.entries(counts).sort((a, c) => c[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(" · ");
@@ -923,6 +956,7 @@ $('[data-a="gentle"]').checked = cfg.gentle !== false; $('[data-a="cfirst"]').ch
       await sleep(500);
       if (!job.running) { hideCd(); return false; }
       if (Date.now() - lastHb > 10000) { lastHb = Date.now(); bg({ type: "hb" }); }
+      if (harvestNow) break;          // ■ Stop: write the statuses this page already shows, the rest go back to the queue
       cards = uspsCards();
       const have = b.tns.filter((t) => cards.has(t) && cards.get(t).status).length;
       if (have !== last) { last = have; lastChange = Date.now(); setCd(`USPS · rows ${rowsOf(b)} · statuses ${have}/${b.tns.length}`); }
@@ -1273,6 +1307,7 @@ $('[data-a="gentle"]').checked = cfg.gentle !== false; $('[data-a="cfirst"]').ch
     chrome.runtime.onMessage.addListener((m, _s, reply) => {
       if (m && m.type === "ping") { if (SITE === "side") return; reply({ ok: true, site: SITE }); }
       if (m && m.type === "kick" && WORKS) { reply({ ok: true }); maybeWork(true); }
+      if (m && m.type === "harvest" && WORKS) { harvestNow = true; reply({ ok: true }); }
       if (m && m.type === "uspsGrab" && SITE === "usps") { const { out } = uspsWrites(uspsCards()); reply({ items: out }); }
     });
     if (!cfg.url) log("Welcome! Open ⚙ Settings > Google Sheet to connect your sheet.", "warn");

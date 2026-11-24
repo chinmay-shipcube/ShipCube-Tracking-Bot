@@ -385,6 +385,20 @@ async function precheck(site) {
   }
 }
 
+// numbers that came back without a status are tried again DURING the run (a full page of them, or any that waited
+// 10 min) - not only at the very end, so a long run doesn't leave blank rows behind for hours.
+function pullRetries(site) {
+  const isU = site === "usps", size = isU ? USPS_BATCH : BATCH, now = Date.now();
+  const mine = S.left.filter((x) => (x.site === "usps") === isU && canRetry(x));
+  if (!mine.length) return;
+  const oldest = Math.min(...mine.map((x) => x.leftAt || now));
+  if (mine.length < size && now - oldest < 600000) return;
+  const take = mine.slice(0, size);
+  S.left = S.left.filter((x) => !take.includes(x));
+  if (isU) S.uq.splice(S.upos, 0, ...take); else S.queue.splice(S.pos, 0, ...take);
+  log(`Trying ${take.length} number${take.length > 1 ? "s" : ""} again that had no status yet (rows ${rowsText(take)}).`);
+}
+
 function nextBatch(site, max) {
   if (site === "usps") {
     const items = [], seen = new Set(), cap = Math.max(1, Math.min(USPS_BATCH, max || USPS_BATCH));
@@ -821,7 +835,7 @@ async function startRun(m, sender) {
     if (m.fresh > 0) S.req = Object.assign({}, S.req, { base: Object.assign({}, S.req.base, { ensureChecked: true }) });
     S.sheetName = m.sheetName || ""; S.sheetId = m.sheetId || ""; S.rangeText = m.rangeText || "";
     S.running = true; S.startedAt = Date.now(); S.note = "";
-    S.onlyKind = m.onlyBNF ? "bnf" : m.onlyNF ? "nf" : m.onlyBlank ? "blank" : ""; S.othersDid = 0; S.noRowsAction = 0;
+    S.onlyKind = m.onlyBNF ? "bnf" : m.onlyNF ? "nf" : m.onlyBlank ? "blank" : ""; S.othersDid = 0; S.noRowsAction = 0; S.stopping = false;
     save(true);
     log(`▶ ${m.onlyBNF ? "Blank + Not found run · " : m.onlyNF ? "Not found run · " : m.onlyBlank ? "Blank run · " : ""}${S.tabs} tab${S.tabs > 1 ? "s" : ""} · ${S.sheetName || "sheet"} · ${S.rangeText} - reading the rows…`);
     const r = await readRange(m);
@@ -1021,9 +1035,32 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     case "log": log(msg.m, msg.c); reply({ ok: true }); return;
     case "whoami": return go(() => ({ tabId, worker: (S.workers && S.workers[tabId]) || null }));
     case "startRun": return go(() => startRun(msg, sender));
-    case "stopRun": return go(async () => {   // ■ Stop: the run ends AND every tab the bot opened is closed (⏸ Pause keeps them open)
+    case "stopRun": return go(async () => {   // ■ Stop: write what the tabs already have, end the run, then close every bot tab (⏸ Pause keeps them open)
+      if (S.stopping) return { ok: true };
       const was = S.running;
-      stopRun(msg.why);
+      if (was) {
+        S.stopping = true; S.paused = true; S.pausedBy = "stop";        // no new batches from here on
+        const busy = Object.keys(S.inflight || {});
+        if (busy.length) {
+          log(`■ Stopping - collecting the statuses the ${busy.length} tab${busy.length > 1 ? "s" : ""} already have, writing them, then closing the tabs…`, "warn");
+          save(true);
+          for (const [tid, w] of Object.entries(S.workers || {})) if (S.inflight[w]) chrome.tabs.sendMessage(+tid, { type: "harvest" }).catch(() => {});
+          const t0 = Date.now();
+          while (Object.keys(S.inflight).length && Date.now() - t0 < 15000) await new Promise((r) => setTimeout(r, 400));
+        }
+        // numbers handed back without a status (and any still out) go to the front, so ▶ Continue does them first
+        const again = S.left.filter(canRetry);
+        S.left = S.left.filter((x) => !canRetry(x));
+        S.queue = again.filter((x) => x.site !== "usps").concat(S.queue.slice(S.pos)); S.pos = 0;
+        S.uq = again.filter((x) => x.site === "usps").concat((S.uq || []).slice(S.upos || 0)); S.upos = 0;
+        S.stopping = false;
+        stopRun(msg.why);
+        const t1 = Date.now();                // wait until everything received is in the sheet (up to 2 min)
+        if (S.buffer.length && !S.writing) flush();
+        while ((S.buffer.length || S.writing) && Date.now() - t1 < 120000) await new Promise((r) => setTimeout(r, 500));
+        log(S.buffer.length ? `${S.buffer.length} status(es) still waiting to be written - the bot keeps trying in the background.` : "All statuses received so far are written to the sheet ✓", S.buffer.length ? "warn" : "ok");
+        if (S.buffer.length) flush();
+      }
       if (was || Object.keys(S.workers || {}).length) {
         await closeStrays(S.winId);
         const n = Object.keys(S.workers || {}).length;
@@ -1035,6 +1072,40 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     case "resetRun": return go(() => { if (!S.running) { const keep = { req: S.req }; S = Object.assign(fresh(), keep); save(true); } return { ok: true }; });
     case "resume": return go(() => {
       if (S.running && S.paused) { S.resumedAt = Date.now(); if (S.pausedBy === "user") log("▶ Resumed."); S.paused = false; S.pausedBy = ""; save(true); kickAll(); }
+      return { ok: true };
+    });
+    case "setTabs": return go(async () => {     // change the number of Track123 tabs during a run (paused or not)
+      if (!S.running) return { ok: true };
+      const n = Math.max(1, Math.min(MAX_TABS, +msg.tabs || 1));
+      const mine = Object.entries(S.workers || {}).filter(([, w]) => ((S.wsite || {})[w] || "track") === "track" && !(S.retire || {})[w])
+        .map(([tid, w]) => [+tid, +w]).sort((a, b) => a[1] - b[1]);
+      const cur = mine.length;
+      S.tabs = n; S.active = Math.min(S.active || n, n); if (n > cur) S.active = n;
+      if (n === cur) { save(true); return { ok: true }; }
+      if (n > cur) {
+        const add = n - cur, ids = [];
+        let next = Math.max(0, ...Object.values(S.workers || {}).map(Number)) + 1;
+        for (let i = 0; i < add; i++) {
+          const id = await newTab("https://www.track123.com/track"), w = next++;
+          S.workers[id] = w; S.wsite[w] = "track"; S.wstate[w] = { state: "starting", rows: "", n: 0, at: Date.now(), site: "track" };
+          chrome.tabs.update(id, { autoDiscardable: false }).catch(() => {});
+          ids.push(id);
+        }
+        if (S.light !== false) lightPages(Object.entries(S.workers).filter(([, x]) => ((S.wsite || {})[x] || "track") === "track").map(([id]) => +id));
+        log(`Track123 tabs: ${cur} → ${n} - opened ${add} more tab${add > 1 ? "s" : ""}${S.paused ? " (they start when you click ▶ Resume)" : ""}.`, "ok");
+        save(true); ids.forEach((id) => kick(id));
+      } else {
+        S.retire = S.retire || {};
+        const extra = mine.slice(n);            // the highest-numbered tabs go
+        for (const [tid, w] of extra) {
+          if (S.inflight[w]) { S.retire[w] = true; continue; }   // busy: finishes and writes its batch first, then closes
+          delete S.workers[tid]; delete S.wstate[w]; delete S.wsite[w];
+          chrome.tabs.remove(tid).catch(() => {});
+        }
+        const busy = extra.filter(([, w]) => S.retire[w]).length;
+        log(`Track123 tabs: ${cur} → ${n}${busy ? ` - ${busy} tab${busy > 1 ? "s close" : " closes"} after finishing ${busy > 1 ? "their" : "its"} current batch` : ""}.`, "ok");
+        save(true);
+      }
       return { ok: true };
     });
     case "pause": return go(() => {      // no new batches; the ones being tracked finish and are written, nothing is lost
@@ -1050,6 +1121,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       const w = S.workers[tabId];
       if (!S.running || !w) return { stop: true };
       if (S.inflight[w]) return Object.assign({ again: true }, S.inflight[w]);      // this tab's batch is not done yet
+      if (S.retire && S.retire[w]) {             // fewer tabs chosen: this one's batch is written - close it now
+        delete S.retire[w]; delete S.workers[tabId]; delete S.wstate[w]; delete S.wsite[w];
+        save(true); setTimeout(() => chrome.tabs.remove(tabId).catch(() => {}), 500);
+        return { stop: true };
+      }
       if (S.paused) return { wait: true };
       const t = Date.now(), site = (S.wsite || {})[w] || "track";
       if (site === "usps") {
@@ -1076,6 +1152,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         if (left < 1) { parkUsps("budget"); return { stop: true }; }
         max = left;
       }
+      pullRetries(site);
       if (S.onlyKind) {
         await precheck(site);
         if (!S.running || S.paused || S.inflight[w] || !S.workers[tabId]) return S.running ? { wait: true } : { stop: true };
@@ -1098,7 +1175,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       (msg.unresolved || []).forEach((x) => {
         // a usps.com "Awaiting Item" row with no Track123 tab in this run (USPS-only test mode): write the usps.com status as it is
         if (x.xcheck && !hasTrack) { direct.push(x.xcheck); addTotal(x.xcheck.st); return; }
-        S.left = S.left.filter((y) => y.row !== x.row); S.left.push(x);
+        S.left = S.left.filter((y) => y.row !== x.row); x.leftAt = Date.now(); S.left.push(x);
       });
       const ws = guard((msg.writes || []).concat(direct));
       ws.forEach(checkProblem);
@@ -1106,7 +1183,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       Object.entries(msg.counts || {}).forEach(([k, v]) => addTotal(k, v));
       S.wstate[w] = { state: "done", rows: "", n: 0, at: Date.now(), site: (S.wsite || {})[w] || "track" };
       if (S.fix) S.fix[w] = 0;             // this tab works again
-      pace(w, msg.signal || {}, tookAt);
+      if (!S.stopping) pace(w, msg.signal || {}, tookAt);     // while stopping: no rests / fresh tabs
       if (S.mode === "manual") { S.paused = true; S.pausedBy = "manual"; }
       save(); flush(); checkFinish();
       return { ok: true };
